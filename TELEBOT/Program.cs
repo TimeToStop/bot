@@ -5,25 +5,102 @@ using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
 using Npgsql;
-using System.Text.RegularExpressions;
 using YandexDiskNET;
+using Telegram.Bot.Types.ReplyMarkups;
+internal enum UserStatus
+{ 
+    AWAITING_NAME,
+    AWAITING_GROUP,
+    AWAITING_CONFIG,
+    AWAITING_AGREE,
+    FINAL
+}
+
+internal class Lab
+{ 
+    public int Id { get; set; }
+    public int GroupId { get; set; }
+    public string Name { get; set; }
+    public int MaxVar { get; set; }
+    public int CurrVar { get; set; }
+    public bool HasTextVar { get; set; }
+    public string TextVar { get; set; }
+}
+
+internal class LabVariant
+{
+    public int Id { get; set; }
+    public int GroupId { get; set; }
+    public string Variant { get; set; }
+}
+
+internal class User
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+    public string Group { get; set; }
+    public List<LabVariant> Config { get; set; }
+    public long ChatId { get; set; }
+    public int LabGroupId { get; set; }
+    public int LabsCount { get; set; }
+    public string TgName { get; set; }
+    public UserStatus Status { get; set; }
+}
 
 internal class Program
-{   
-    static private TelegramBotClient client;
-    static private NpgsqlConnection con;
+{
     static string myConnectionString;
     static string myTokenString;
     static string yandextoken;
     static YandexDiskRest disk;
     static DiskInfo diskInfo;
+    static TelegramBotClient client;
+    static NpgsqlConnection con;
+    static Mutex mutex = new Mutex();
 
+    static string toString(UserStatus status)
+    {
+        switch (status)
+        {
+            case UserStatus.AWAITING_NAME:
+                return "AWAITING_NAME";
+            case UserStatus.AWAITING_GROUP:
+                return "AWAITING_GROUP";
+            case UserStatus.AWAITING_CONFIG:
+                return "AWAITING_CONFIG";
+            case UserStatus.AWAITING_AGREE:
+                return "AWAITING_AGREE";
+            case UserStatus.FINAL:
+                return "FINAL";
+            default:
+                return "UNKNOWN";
+        }
+    }
+
+    static UserStatus fromString(string data)
+    {
+        switch (data)
+        {
+            case "AWAITING_NAME":
+                return UserStatus.AWAITING_NAME;
+            case "AWAITING_GROUP":
+                return UserStatus.AWAITING_GROUP;
+            case "AWAITING_CONFIG":
+                return UserStatus.AWAITING_CONFIG;
+            case "AWAITING_AGREE":
+                return UserStatus.AWAITING_AGREE;
+            case "FINAL":
+                return UserStatus.FINAL;
+            default:
+                return UserStatus.FINAL;
+        }
+    }
 
     static bool ConnectToYandexDisk()
     {
         disk = new YandexDiskRest(yandextoken);
         diskInfo = disk.GetDiskInfo();
-        
+
         DiskInfo diskInfoFeilds = disk.GetDiskInfo(new DiskFields[] {
                 DiskFields.Total_space,
                 DiskFields.Used_space,
@@ -38,7 +115,7 @@ internal class Program
             return true;
         }
         else
-        { 
+        {
             Console.WriteLine("No connect to disk");
             Console.WriteLine(diskInfoFeilds.ErrorResponse.Message);
             return false;
@@ -51,18 +128,18 @@ internal class Program
         Console.WriteLine("Enter telegram token:");
         Linetext = Console.ReadLine();
         myTokenString = Linetext;
-        System.IO.File.AppendAllText("Config.cfg", "TelegramToken " + Linetext+"\n");
+        System.IO.File.AppendAllText("Config.cfg", "TelegramToken " + Linetext + "\n");
         Console.WriteLine("Enter Yandex token:");
         Linetext = Console.ReadLine();
-        System.IO.File.AppendAllText("Config.cfg", "YandexToken " + Linetext + "\n"); 
+        System.IO.File.AppendAllText("Config.cfg", "YandexToken " + Linetext + "\n");
         yandextoken = Linetext;
         Console.WriteLine("Enter host of database:");
         Linetext = Console.ReadLine();
-        myConnectionString = "Host =" + Linetext+";";
+        myConnectionString = "Host =" + Linetext + ";";
         System.IO.File.AppendAllText("Config.cfg", "DataSource " + Linetext + "\n");
         Console.WriteLine("Enter username of database:");
         Linetext = Console.ReadLine();
-        myConnectionString = myConnectionString + "Username=" + Linetext + ";"; 
+        myConnectionString = myConnectionString + "Username=" + Linetext + ";";
         System.IO.File.AppendAllText("Config.cfg", "uid " + Linetext + "\n");
         Console.WriteLine("Enter password:");
         Linetext = Console.ReadLine();
@@ -73,16 +150,16 @@ internal class Program
         myConnectionString = myConnectionString + "Database=" + Linetext + ";";
         System.IO.File.AppendAllText("Config.cfg", "database " + Linetext + "\n");
     }
-   
+
 
     static void Configload()
     {
-        string datasours="", uid = "", database = "", password = "";
+        string datasours = "", uid = "", database = "", password = "";
         string[] Mass = System.IO.File.ReadAllLines(@"Config.cfg", System.Text.Encoding.Default);
         for (int i = 0; i < Mass.Length; i++)
         {
             Console.WriteLine(Mass[i]);
-            if((Mass[i].Split(" "))[0] == "TelegramToken")
+            if ((Mass[i].Split(" "))[0] == "TelegramToken")
             {
                 myTokenString = (Mass[i].Split(" "))[1];
             }
@@ -105,11 +182,11 @@ internal class Program
             }
             if ((Mass[i].Split(" "))[0] == "YandexToken")
             {
-                yandextoken= (Mass[i].Split(" "))[1];
+                yandextoken = (Mass[i].Split(" "))[1];
             }
         }
 
-        myConnectionString = "Host =" + datasours + ";Username=" + uid+ "; Password="+ password + ";Database=" + database;
+        myConnectionString = "Host =" + datasours + ";Username=" + uid + "; Password=" + password + ";Database=" + database;
     }
 
     static bool configcheck()
@@ -138,8 +215,33 @@ internal class Program
         Console.WriteLine(ErrorMessage);
         return Task.CompletedTask;
     }
+    static async Task Connect()
+    {
+        var cts = new CancellationTokenSource();
+        var receiverOptions = new ReceiverOptions
+        {
+            AllowedUpdates = { } // receive all update types
+        };
+        client = new TelegramBotClient(myTokenString);
+
+        client.StartReceiving(
+                HandleUpdateAsync,
+                HandleErrorAsync,
+                receiverOptions,
+                cancellationToken: cts.Token
+        );
+
+        var me = await client.GetMeAsync();
+
+        Console.WriteLine($"Connected to @{me.Username}");
+        Console.WriteLine($"Name {me.Id} Name {me.FirstName}.");
+
+        Console.ReadLine();
+        cts.Cancel();
+    }
+
     static bool ConnectToTelegram()
-    {        
+    {
         try
         {
             Console.WriteLine("Connection to TelegramAPI");
@@ -151,57 +253,433 @@ internal class Program
         {
             Console.WriteLine("[API] Connection error to TelegramAPI " + ex.Message);
         }
-
         return false;
     }
-   
-    static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
-    {    
-        if (update.Type != UpdateType.Message)
-            return;
-        // Only process text messages
-        if (update.Message!.Type != MessageType.Text)
-            return;
 
-        var chatId = update.Message.Chat.Id;
-        var messageText = update.Message.Text;
+    static List<User> GetAllUsers()
+    {
+        List<User> users = new List<User>();
 
-        if (messageText != null)
+        mutex.WaitOne();
+
+        string sql = "SELECT * FROM \"users\"";
+        NpgsqlCommand cmd = new NpgsqlCommand(sql, con);
+        NpgsqlDataReader reader = cmd.ExecuteReader();
+
+        while (reader.Read())
         {
-            if (messageText[0].ToString() == "/")
+            User user = new User();
+
+            user.ChatId = Int32.Parse(reader["chat_id"].ToString());
+
+            user.Id = Int32.Parse(reader["id"].ToString());
+            user.LabsCount = Int32.Parse(reader["labs_count"].ToString());
+            user.LabGroupId = Int32.Parse(reader["lab_group"].ToString());
+            user.Group = reader["group_n"].ToString();
+            user.Name = reader["u_name"].ToString();
+            user.Status = fromString(reader["status"].ToString());
+            user.TgName = reader["telegram_name"].ToString();
+
+            string config = reader["config"].ToString();
+            string[] array = config.Split(';');
+            List<LabVariant> vars = new List<LabVariant>();
+
+            for (int i = 0; i + 2 < array.Length; i += 3)
             {
-                command(messageText, botClient, cancellationToken, chatId, update);
+                int groupId = Int32.Parse(array[i]);
+                int labId = Int32.Parse(array[i + 1]);
+                string variant = array[i + 2];
+
+                LabVariant lab = new LabVariant();
+
+                lab.GroupId = groupId;
+                lab.Id = labId;
+                lab.Variant = variant;
+
+                vars.Add(lab);
+            }
+
+            user.Config = vars;
+
+            users.Add(user);
+        }
+
+        mutex.ReleaseMutex();
+
+        reader.Close();
+        return users;
+    }
+
+    static User GetUserByChatId(long chatId)
+    {
+        mutex.WaitOne();
+
+        string sql = "SELECT * FROM \"users\" WHERE chat_id = (" + chatId + ")";
+        NpgsqlCommand cmd = new NpgsqlCommand(sql, con);
+        NpgsqlDataReader reader = cmd.ExecuteReader();
+
+        if (reader.Read())
+        { 
+            User user = new User();
+
+            user.ChatId = chatId;
+
+            user.Id = Int32.Parse(reader["id"].ToString());
+            user.LabsCount = Int32.Parse(reader["labs_count"].ToString());
+            user.LabGroupId = Int32.Parse(reader["lab_group"].ToString());
+            user.Group = reader["group_n"].ToString();
+            user.Name = reader["u_name"].ToString();
+            user.Status = fromString(reader["status"].ToString());
+            user.TgName = reader["telegram_name"].ToString();
+
+            string config = reader["config"].ToString();
+            string[] array = config.Split(';');
+            List<LabVariant> vars = new List<LabVariant>();
+
+            for (int i = 0; i + 2 < array.Length; i += 3)
+            {
+                int groupId = Int32.Parse(array[i]);
+                int labId = Int32.Parse(array[i + 1]);
+                string variant = array[i + 2];
+
+                LabVariant lab = new LabVariant();
+
+                lab.GroupId = groupId;
+                lab.Id = labId;
+                lab.Variant = variant;
+
+                vars.Add(lab);
+            }
+
+            user.Config = vars;
+
+            mutex.ReleaseMutex();
+            reader.Close();
+            return user;
+        }
+
+        mutex.ReleaseMutex();
+        reader.Close();
+        return null;
+    }
+
+    static SortedDictionary<int, int> GetLabConfig()
+    {
+        SortedDictionary<int, int> config = new SortedDictionary<int, int>();
+
+        mutex.WaitOne();
+
+        string sql = "SELECT id,need_var FROM \"labs_config\" ORDER BY id";
+        NpgsqlCommand cmd = new NpgsqlCommand(sql, con);
+        NpgsqlDataReader reader = cmd.ExecuteReader();
+
+        while (reader.Read()) 
+        {
+            int groupId = Int32.Parse(reader["id"].ToString());
+            int amount = Int32.Parse(reader["need_var"].ToString());
+
+            config.Add(groupId, amount);
+        }
+
+        mutex.ReleaseMutex();
+        reader.Close();
+        return config;
+    }
+
+    static List<string> GetGroups()
+    {
+        List<string> groups = new List<string>();
+
+        mutex.WaitOne();
+
+        string sql = "SELECT id,g_name FROM \"g_list\" ORDER BY id";
+        NpgsqlCommand cmd = new NpgsqlCommand(sql, con);
+        NpgsqlDataReader reader = cmd.ExecuteReader();
+
+        while (reader.Read())
+        {
+            groups.Add(reader["g_name"].ToString());
+        }
+
+        mutex.ReleaseMutex();
+        reader.Close();
+        return groups;
+    }
+
+    static List<Lab> GetLabs()
+    {
+        List<Lab> labs = new List<Lab>();
+
+        mutex.WaitOne();
+
+        string sql = "SELECT * FROM \"listlabs\" ORDER BY id";
+        NpgsqlCommand cmd = new NpgsqlCommand(sql, con);
+        NpgsqlDataReader reader = cmd.ExecuteReader();
+
+        while (reader.Read())
+        {
+            int id = Int32.Parse(reader["id"].ToString());
+            int groupId = Int32.Parse(reader["c_labs"].ToString());
+            string name = reader["name_labs"].ToString();
+            int max_var = Int32.Parse(reader["max_var"].ToString());
+            int curr_var = Int32.Parse(reader["now_var"].ToString());
+            bool is_text = (reader["var_text"].ToString() == "True");
+          
+            Lab lab = new Lab();
+
+            lab.Id = id;
+            lab.GroupId = groupId;
+            lab.Name = name;
+            lab.MaxVar = max_var;
+            lab.CurrVar = curr_var;
+            lab.HasTextVar = is_text;
+
+            if (lab.HasTextVar && reader["now_var_text"] != null) 
+            {
+                lab.TextVar = reader["now_var_text"].ToString();
+            }
+
+            labs.Add(lab);
+        }
+
+        mutex.ReleaseMutex();
+        reader.Close();
+        return labs;
+    }
+
+    static void updateUser(long chatId, User user)
+    {
+        string config = "";
+
+        foreach(var var in user.Config)
+        {
+            config += var.GroupId + ";" + var.Id + ";" + var.Variant + ";";
+        }
+
+        if (config.Length != 0)
+        {
+            config = config.Substring(0, config.Length - 1);
+        }
+
+        mutex.WaitOne();
+
+        string sql = String.Format("UPDATE \"users\" SET u_name = '{0}', group_n = '{1}', status = '{2}', config = '{3}', lab_group = {4}, labs_count={5}  WHERE chat_id = {6}",
+                    user.Name, user.Group, toString(user.Status), config, user.LabGroupId, user.LabsCount, chatId);
+        NpgsqlCommand cmd = new NpgsqlCommand(sql, con);
+        cmd.ExecuteNonQuery();
+
+        mutex.ReleaseMutex();
+    }
+
+    static string GetNextVarAndUpdate(Lab lab)
+    {
+        string var = lab.HasTextVar ? lab.CurrVar.ToString() + lab.TextVar : lab.CurrVar.ToString();
+
+        if (lab.HasTextVar)
+        {
+            int i = 0;
+            string[] data = { "а", "б", "в", "г", "д" };
+
+            for (; i != data.Length; i++)
+            {
+                if (data[i].Equals(lab.TextVar))
+                {
+                    break;              
+                }
+            }
+
+            if (i != data.Length - 1)
+            {
+                lab.TextVar = data[i + 1];
             }
             else
             {
-                register(update,  botClient,  cancellationToken, chatId);
+                lab.TextVar = data[0];
+                lab.CurrVar += 1;
+
+                if (lab.CurrVar > lab.MaxVar)
+                {
+                    lab.CurrVar = 1;
+                }
             }
         }
-    }
-    static async Task Connect()
-    {
-        var cts = new CancellationTokenSource();
-        var receiverOptions = new ReceiverOptions
+        else
         {
-            AllowedUpdates = { } // receive all update types
-        };
-        client = new TelegramBotClient(myTokenString);
-        
-        client.StartReceiving(
-                HandleUpdateAsync,
-                HandleErrorAsync,
-                receiverOptions,
-                cancellationToken: cts.Token
-        );
+            lab.CurrVar += 1;
 
-        var me = await client.GetMeAsync();
-        
-        Console.WriteLine($"Connected to @{me.Username}");
-        Console.WriteLine($"Name {me.Id} Name {me.FirstName}.");
+            if (lab.CurrVar > lab.MaxVar)
+            {
+                lab.CurrVar = 1;
+            }
+        }
 
-        Console.ReadLine();
-        cts.Cancel();
+        mutex.WaitOne();
+
+        string sql = String.Format("UPDATE \"listlabs\" SET now_var = {0} {1} WHERE id = {2}", lab.CurrVar, lab.HasTextVar ? String.Format(", now_var_text = '{0}'", lab.TextVar) : "", lab.Id);
+        NpgsqlCommand cmd = new NpgsqlCommand(sql, con);
+        cmd.ExecuteNonQuery();
+
+        mutex.ReleaseMutex();
+
+        return var;
     }
+
+    static async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
+    {
+        if (update.Type == UpdateType.Message)
+        {
+            if (update.Message == null || update.Message.Text == null) return;
+
+            var chatId = update.Message.Chat.Id;
+            var messageText = update.Message.Text;
+
+            if (messageText[0].ToString() == "/")
+            {
+                await command(messageText, botClient, cancellationToken, chatId, update);
+            }
+            else
+            {
+                await textMsg(messageText, botClient, cancellationToken, chatId, update); 
+            }
+        }
+        else if (update.Type == UpdateType.CallbackQuery)
+        {
+            if (update.CallbackQuery == null || update.CallbackQuery.Message == null || update.CallbackQuery.Data == null) return;
+
+            var msgId = update.CallbackQuery.Message.MessageId;
+            var chatId = update.CallbackQuery.Message.Chat.Id;
+            var callbackData = update.CallbackQuery.Data;
+
+            await buttonCallback(callbackData, botClient, cancellationToken, chatId, msgId, update);
+        }
+    }
+    static async Task buttonCallback(string data, ITelegramBotClient botClient, CancellationToken cancellationToken, long chatId, int msgId, Update update)
+    {
+        User user = GetUserByChatId(chatId);
+        SortedDictionary<int, int> labConfig = GetLabConfig();
+        List<Lab> labs = GetLabs();
+
+        if (user == null) return;
+
+        if (user.Status != UserStatus.AWAITING_GROUP && user.Status != UserStatus.AWAITING_CONFIG) return;
+
+        if (user.Status == UserStatus.AWAITING_GROUP)
+        {
+            user.Status = UserStatus.AWAITING_CONFIG;
+            user.Group = data;
+
+
+            await botClient.SendTextMessageAsync(
+                chatId: chatId,
+                text: "Вы уcпешно зарегистрировались:\r\nФИО - " + user.Name + "\r\n" + "Группа - " + user.Group 
+                + "\r\nДля выбора лабораторных работ введите /choose",
+                cancellationToken: cancellationToken
+            );
+        }
+        else if (user.Status == UserStatus.AWAITING_CONFIG)
+        {
+            string[] array = data.Split(';');
+
+            if (array.Length != 2) return;
+
+            int groupId = Int32.Parse(array[0]);
+            int labId = Int32.Parse(array[1]);
+
+            // If old button then ignore
+            if (groupId != user.LabGroupId) return;
+
+            // if lab already was chosen
+            if (user.Config.Any(var => var.Id == labId)) return;
+
+            int index = labs.FindIndex(lab => lab.Id == labId);
+
+            if (index == -1) return;
+
+            Lab lab = labs[index];
+
+            LabVariant labVar = new LabVariant();
+
+            labVar.Id = labId;
+            labVar.GroupId = groupId;
+            labVar.Variant = GetNextVarAndUpdate(lab);
+
+            await botClient.SendTextMessageAsync(
+                chatId: chatId,
+                text: lab.Name + " - вариант " + labVar.Variant,
+                cancellationToken: cancellationToken
+            );
+
+            user.LabsCount += 1;
+            user.Config.Add(labVar);
+
+            int amount = labConfig.GetValueOrDefault(groupId);
+
+            if (amount == user.LabsCount)
+            {
+                user.LabsCount = 0;
+                user.LabGroupId += 1;
+
+                if (!labConfig.ContainsKey(user.LabGroupId))
+                {
+                    user.Status = UserStatus.FINAL;
+                    user.LabGroupId = 0;
+                    user.LabsCount = 0;
+                }
+            }
+
+            // if first lab in group
+            if (user.LabGroupId != 0 && user.LabsCount == 0)
+            {
+                var list = new List<InlineKeyboardButton[]>();
+
+                foreach (var current in labs)
+                {
+                    if (current.GroupId == user.LabGroupId)
+                    {
+                        var button = InlineKeyboardButton.WithCallbackData(current.Name, current.GroupId.ToString() + ";" + current.Id);
+                        var row = new InlineKeyboardButton[1] { button };
+
+                        list.Add(row);
+                    }
+                }
+
+                await botClient.SendTextMessageAsync(
+                    chatId: chatId,
+                    text: "Выберите лабораторные работы? (Всего " + labConfig.GetValueOrDefault(user.LabGroupId) + ")",
+                    replyMarkup: new InlineKeyboardMarkup(list),
+                    cancellationToken: cancellationToken
+                );
+            }
+        }
+
+        if (user.Status == UserStatus.FINAL)
+        {
+            string result = "Выбор лабораторных завершен:\r\n";
+
+            foreach (var conf in user.Config)
+            {
+                int index = labs.FindIndex(lab => lab.Id == conf.Id);
+
+                if (index == -1) continue;
+
+                result += labs[index].Name + " - вариант " + conf.Variant + "\r\n";
+            }
+
+            await botClient.SendTextMessageAsync(
+                chatId: chatId,
+                text: result,
+                cancellationToken: cancellationToken
+            );
+        }
+
+        updateUser(chatId, user);
+
+        if (user.Status == UserStatus.FINAL)
+        {
+            UploadFile("Users.csv");
+        }
+    }
+
     static async Task command(string cmd, ITelegramBotClient botClient, CancellationToken cancellationToken, long chatId, Update update)
     {
         Console.WriteLine(cmd);
@@ -210,519 +688,163 @@ internal class Program
             case "/start":
                 start(update, botClient, cancellationToken, chatId);
                 break;
+            case "/info":
+                info(update, botClient, cancellationToken, chatId);
+                break;
+            case "/choose":
+                choose(update, botClient, cancellationToken, chatId);
+                break;
+            case "/help":
+                await botClient.SendTextMessageAsync(
+                    chatId: chatId,
+                    text: "Это иформация по боту\n /info - Вывести информацию \n /choose - приступить к выбору лабораторных работ",
+                    cancellationToken: cancellationToken
+                );
+                break;
+            default:
+                await botClient.SendTextMessageAsync(
+                    chatId: chatId,
+                    text: "Неизвестная команда:\r\n/start - регистрация\r\n/info - вывод информации\r\n/choose - выбор лабораторных работ\n",
+                    cancellationToken: cancellationToken
+                );
+                break;
         }
     }
-    static async void choicelab(Update update, ITelegramBotClient botClient, CancellationToken cancellationToken, long chatId)
+
+    static async Task textMsg(string text, ITelegramBotClient botClient, CancellationToken cancellationToken, long chatId, Update update)
     {
-        try
+        User user = GetUserByChatId(chatId);
+        List<string> groups = GetGroups();
+
+        if (user == null) return;
+
+        if (user.Status == UserStatus.AWAITING_NAME)
         {
-            string sql = "SELECT status FROM \"users\" WHERE chat_id = (" + update.Message.Chat.Id + ")";
+            user.Status = UserStatus.AWAITING_GROUP;
+            user.Name = text;
 
-            NpgsqlNestedDataReader reader1;
-            NpgsqlDataReader reader;
-            NpgsqlCommand command, command1;
+            var list = new List<InlineKeyboardButton[]>();
 
-            Console.WriteLine(sql);
-            command = new NpgsqlCommand(sql, con);
-            reader = command.ExecuteReader();
-
-            if (reader.Read())
+            foreach (var group in groups)
             {
-                string status = reader["status"].ToString();
-             
-                if ((status.Split(" "))[0] == "choice")
-                {
-                    reader.Close();
+                var button = InlineKeyboardButton.WithCallbackData(group);
+                var row = new InlineKeyboardButton[1] { button };
 
-                    if (((status.Split(" "))[1] == "1"))
-                    {
-                        sql = "SELECT need_var FROM \"labs_config\" WHERE id = (1) ;";
-                        Console.WriteLine(sql);
-                        command = new NpgsqlCommand(sql, con);
-                        reader = command.ExecuteReader();
-                        if (reader.Read())
-                        {
-                            int number = Int32.Parse(reader["need_var"].ToString());
-                            reader.Close();
-                            sql = "SELECT id,name_labs FROM \"listlabs\" WHERE c_labs = (1) ORDER BY id";
-                            Console.WriteLine(sql);
-                            command = new NpgsqlCommand(sql, con);
-                            reader = command.ExecuteReader();
-
-                            string text = "";
-
-                            int neednumber = 0;
-                            while (await reader.ReadAsync())
-                            {
-                                neednumber++;
-                                Console.WriteLine(reader["name_labs"]);
-                                text = text + neednumber + ") " + reader["name_labs"] + "\n";
-                            }
-
-                            reader.Close();
-                            sql = String.Format("UPDATE \"users\" SET  status = 'choice 2' WHERE chat_id={0};", update.Message.Chat.Id);
-                            Console.WriteLine(sql);
-                            command1 = new NpgsqlCommand(sql, con);
-                            command1.ExecuteNonQuery();
-
-                            await botClient.SendTextMessageAsync(
-                                  chatId: chatId,
-                                 text: "Вам нужно выбрать " + number + " Лабораторных работ из списка:\n" + text + "\n Введите данные в формате N - Где N Это номер лабораторной работы ",
-                                 cancellationToken: cancellationToken
-                             );
-                        }
-
-                    }
-                    else if (((status.Split(" "))[1] == "2"))
-                    {
-                        List<string> listSQL = new List<string>();
-                        // Проверка данных
-                        string[] numbersstr = ((update.Message.Text).ToString()).Replace('\t', ' ').Replace('\n', ' ').Replace('\r', ' ').Split(' ');
-                        bool check = true;
-                        if (numbersstr.Length >= 1)
-                        {
-                            if ((!Regex.IsMatch(update.Message.Text.ToString(), @"^[\d\s]+$")))
-                            {
-                                check = false;
-                            }
-                            for (int i = 1; (i < numbersstr.Length) && check; i++)
-                            {
-
-                                if (Int32.Parse(numbersstr[0]) == ( Int32.Parse(numbersstr[i])) || Int32.Parse(numbersstr[i])>=5 || Int32.Parse(numbersstr[0])>=5)
-                                {
-                                    check = false; break;
-                                }
-                            }
-                            if (numbersstr.Length == 2  && check)
-                            {
-                                reader.Close();
-                                sql = "SELECT id,name_labs,now_var,max_var FROM \"listlabs\" WHERE c_labs = (1) ORDER BY id";
-                                Console.WriteLine(sql);
-                                command = new NpgsqlCommand(sql, con);
-                                reader = command.ExecuteReader();
-                                int neednumber = 1;
-                                string text = "Вами были выбраны следующие работы:\n";
-                                string finalsql="";
-                                bool es = false;
-                                string sql1 = "";
-                                while (await reader.ReadAsync())
-                                {
-                               
-                                    for (int i = 0  ; i < 2; i++)
-                                    {
-
-                                        if (neednumber.ToString() == numbersstr[i])
-                                        {
-                                            text = text + neednumber + ")" + reader["name_labs"] + "Ваш вариант " + reader["now_var"] + "\n";
-                                            if (Convert.ToInt32(reader["now_var"]) + 1 < Convert.ToInt32(reader["max_var"]))
-                                            {
-                                                sql1 = String.Format("UPDATE \"listlabs\" SET  now_var = now_var+1 WHERE name_labs=\'{0}\'", reader["name_labs"].ToString());
-                                                listSQL.Add(sql1);
-                                            }
-                                            else
-                                            {
-                                                sql1 = String.Format("UPDATE \"listlabs\" SET  now_var = (1) WHERE name_labs=\'{0}\'", reader["name_labs"].ToString());
-                                                listSQL.Add(sql1);
-                                            }
-                                      
-                                        }
-                                    }
-
-                                    neednumber++;
-                                }
-                                Console.WriteLine("Output SQL:" + finalsql);
-                                command1 = new NpgsqlCommand(finalsql, con);
-                                command1.ConfigureAwait(false);
-                                command1.ExecuteNonQueryAsync();
-                                await botClient.SendTextMessageAsync(
-                                    chatId: chatId,
-                                    text: text,
-                                    cancellationToken: cancellationToken
-                                );
-                                reader.Close();
-                                for(int indexer = 0; indexer < listSQL.Count; indexer++)
-                                {
-                                    command1 = new NpgsqlCommand(listSQL[indexer], con);
-                                    command1.ExecuteNonQuery();
-                                }
-                                
-                                Console.WriteLine(sql);
-                                command1 = new NpgsqlCommand(sql, con);
-                                command1.ExecuteNonQuery();
-                                sql = String.Format("UPDATE \"users\" SET  labconfig1 = \'{0}\', status = 'choice 3'  WHERE chat_id={1};", text, update.Message.Chat.Id);
-                                Console.WriteLine(sql);
-                                command1 = new NpgsqlCommand(sql, con);
-                                command1.ExecuteNonQuery();
-                                choicelab(update, botClient, cancellationToken, chatId);
-                            }
-
-                            else
-                            {
-                                await botClient.SendTextMessageAsync(
-                                    chatId: chatId,
-                                    text: "Что то пошло не так проверьте формат",
-                                    cancellationToken: cancellationToken
-                                );
-                            }
-                        }
-
-                        if (!check)
-                        {
-                           await botClient.SendTextMessageAsync(
-                                 chatId: chatId,
-                                 text: "Некоректные данные",
-                                 cancellationToken: cancellationToken
-                           );
-                        }
-
-                    }
-                    else if (((status.Split(" "))[1] == "3"))
-                    {
-                        sql = "SELECT need_var FROM \"labs_config\" WHERE id = (2)";
-                        Console.WriteLine(sql);
-                        command = new NpgsqlCommand(sql, con);
-                        reader = command.ExecuteReader();
-                        if (reader.Read())
-                        {
-                            int number = Int32.Parse(reader["need_var"].ToString());
-                            reader.Close();
-                            sql = "SELECT id,name_labs FROM \"listlabs\" WHERE c_labs = (2) ORDER BY id";
-                            Console.WriteLine(sql);
-                            command = new NpgsqlCommand(sql, con);
-                            reader = command.ExecuteReader();
-
-                            string text = "";
-
-                            {
-                                int neednumber = 0;
-                                while (await reader.ReadAsync())
-                                {
-                                    neednumber++;
-                                    Console.WriteLine(reader["name_labs"]);
-                                    text = text + neednumber + ") " + reader["name_labs"] + "\n";
-
-                                }
-
-
-                                reader.Close();
-                                sql = String.Format("UPDATE \"users\" SET  status = 'choice 4' WHERE chat_id={0};", update.Message.Chat.Id);
-                                command = new NpgsqlCommand(sql, con);
-                                reader = command.ExecuteReader();
-                                await botClient.SendTextMessageAsync(
-                                    chatId: chatId,
-                                    text: "Вам нужно выбрать " + number + " Лабораторных работ из списка:\n" + text + "\n Введите данные в формате N N - Где N Это номер лабораторной работы ",
-                                    cancellationToken: cancellationToken
-                                );
-
-                            }
-
-                        }
-
-                    }
-                    else if (((status.Split(" "))[1] == "4"))
-                    {
-                        List<string> listSQL = new List<string>();
-                        string[] numbersstr = ((update.Message.Text).ToString()).Replace('\t', ' ').Replace('\n', ' ').Replace('\r', ' ').Split(' ');
-                        bool check = true;
-
-                        if (numbersstr.Length >= 5)
-                        {
-                            if ((!Regex.IsMatch(update.Message.Text.ToString(), @"^[\d\s]+$")))
-                            {
-                                check = false;
-                            }
-                            
-                            for (int i = 0; i < numbersstr.Length && check; i++)
-                            {
-                                for (int x = i + 1; x < numbersstr.Length;x++)
-                                {
-                                    if (Int32.Parse(numbersstr[i]) == Int32.Parse(numbersstr[x]) || Int32.Parse(numbersstr[x]) >= 15 || Int32.Parse(numbersstr[i]) >= 15)
-                                    {
-                                        check = false; 
-                                        break;
-                                    }
-
-                                    if (!check) break;
-                                }
-                                
-                            }
-
-                            if (numbersstr.Length == 5  && check)
-                            {
-                                reader.Close();
-                                sql = "SELECT id,name_labs,now_var,max_var,var_text,now_var_text FROM \"listlabs\" WHERE c_labs = (2) ORDER BY id";
-                                Console.WriteLine(sql);
-                                command = new NpgsqlCommand(sql, con);
-                                
-                                reader = command.ExecuteReader();
-                                int neednumber = 1;
-                                bool var_text = false;
-                                string sql1 = "";
-                                string text = "Вами были выбраны следующие работы:\n";
-                                while (await reader.ReadAsync())
-                                {
-                                   
-                                    for (int i = 0; i < 5; i++)
-                                    {
-                                       
-                                        if (neednumber.ToString() == numbersstr[i])
-                                        {
-
-                                            string[] vartext = { "а", "б", "в", "г", "д" };
-                                            
-                                            if (reader["var_text"].ToString() == "True")
-                                            {
-                                                var_text = true;
-                                            }
-                                            else
-                                            {
-                                                var_text = false;
-                                            }
-                                            if(var_text)
-                                            {
-                                                text = text + neednumber + ")" + reader["name_labs"] + " Ваш вариант " + reader["now_var"] + reader["now_var_text"].ToString() + "\n";
-                                            }
-                                            else
-                                            {
-                                                text = text + neednumber + ")" + reader["name_labs"] + " Ваш вариант " + reader["now_var"] + "\n";
-                                            }
-                                            
-                                            if(var_text)
-                                            {
-                                                int variant_now = 0;
-                                                for (int s=0;s<5;s++)
-                                                {
-                                                    
-                                                    if (vartext[s]== reader["now_var_text"].ToString())
-                                                    { break; }
-                                                    variant_now++;
-                                                }
-                                                if (variant_now < 4)
-                                                {
-                                                    sql = String.Format("UPDATE \"listlabs\" SET  now_var_text = \'{1}\' WHERE name_labs=\'{0}\'", reader["name_labs"].ToString(), vartext[variant_now+1]);
-                                                    
-                                                    listSQL.Add(sql);
-                                                }
-                                                else
-                                                {
-                                                    if (Convert.ToInt32(reader["now_var"]) + 1 < Convert.ToInt32(reader["max_var"]))
-                                                    {
-                                                        sql = String.Format("UPDATE \"listlabs\" SET  now_var = now_var+1, now_var_text='a' WHERE name_labs=\'{0}\'", reader["name_labs"].ToString());
-                                                        listSQL.Add(sql);
-                                                    }
-                                                    else
-                                                    {
-                                                        sql = String.Format("UPDATE \"listlabs\" SET  now_var = (1), now_var_text='a' WHERE name_labs=\'{0}\'", reader["name_labs"].ToString());
-                                                        listSQL.Add(sql);
-                                                    }
-
-                                                }
-                                            }
-                                            else
-                                            {
-                                                if (Convert.ToInt32(reader["now_var"]) + 1 < Convert.ToInt32(reader["max_var"]))
-                                                {
-                                                    sql = String.Format("UPDATE \"listlabs\" SET  now_var = now_var+1 WHERE name_labs=\'{0}\'", reader["name_labs"].ToString());
-                                                    listSQL.Add(sql);
-                                                }
-                                                else
-                                                {
-                                                    sql = String.Format("UPDATE \"listlabs\" SET  now_var = (1) WHERE name_labs=\'{0}\'", reader["name_labs"].ToString());
-                                                    listSQL.Add(sql);
-                                                }
-                                            }
-
-                                        }
-                                    }
-
-                                    neednumber++;
-                                }
-                                Message sentMessage = await botClient.SendTextMessageAsync(
-                                    chatId: chatId,
-                                    text: text,
-                                    cancellationToken: cancellationToken
-                                );
-                                reader.Close();
-                                for (int indexer = 0; indexer < listSQL.Count; indexer++)
-                                {
-                                    Console.WriteLine(listSQL[indexer]);
-                                    command1 = new NpgsqlCommand(listSQL[indexer], con);
-                                    command1.ExecuteNonQuery();
-                                }
-                                Console.WriteLine(sql);
-                                command1 = new NpgsqlCommand(sql, con);
-                                command1.ExecuteNonQuery();
-                                sql = String.Format("UPDATE \"users\" SET  labconfig2 = \'{0}\', status = 'Final'  WHERE chat_id={1};", text, update.Message.Chat.Id);
-                                Console.WriteLine(sql);
-                                command1 = new NpgsqlCommand(sql, con);
-                                command1.ExecuteNonQuery();
-                                reader.Close();
-                                sql = String.Format("SELECT u_name,group_n,labconfig1,labconfig2,telegram_name  FROM \"users\" ");
-                                SqlToFile(sql, "Users.csv");
-                            }
-                            else
-                            {
-                               await botClient.SendTextMessageAsync(
-                                   chatId: chatId,
-                                   text: "Что то пошло не так проверьте формат",
-                                   cancellationToken: cancellationToken
-                              );
-                            }
-                        }
-                        else
-                        {
-                            check = false;
-                        }
-
-                        if(!check)
-                        {
-                            await botClient.SendTextMessageAsync(
-                                 chatId: chatId,
-                                 text: "Что то пошло не так проверьте формат",
-                                 cancellationToken: cancellationToken
-                            );
-                        }
-
-                    }
-                }
+                list.Add(row);
             }
-            reader.Close();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine("Error " + ex.Message);
-            throw new Exception(ex.Message, ex);
-        }
-    }
-    static async void finalall(Update update, ITelegramBotClient botClient, CancellationToken cancellationToken, long chatId)
-    {
-        string sql;
-        NpgsqlDataReader reader;
-        NpgsqlCommand command, command1;
-        sql = "SELECT labconfig1,labconfig2 FROM \"users\" WHERE chat_id = (" + update.Message.Chat.Id + ")";
-        command = new NpgsqlCommand(sql, con);
-        reader = command.ExecuteReader();
-        string text1, text2;
-        
-        if (reader.Read())
-        {
-            text1 = reader["labconfig1"].ToString();
-            text2 = reader["labconfig2"].ToString();
-            reader.Close();
-            
+
             await botClient.SendTextMessageAsync(
                 chatId: chatId,
-                text: text1+"\n",
+                text: "Выберите группу:",
+                replyMarkup: new InlineKeyboardMarkup(list),
                 cancellationToken: cancellationToken
             );
 
+            updateUser(chatId, user);
+        }
+    }
+
+    static async void info(Update update, ITelegramBotClient botClient, CancellationToken cancellationToken, long chatId)
+    {
+        await botClient.SendTextMessageAsync(
+             chatId: chatId,
+             text: "Данный бот используется для получения вариантов на лабораторные \r\nработы по курсу “Информационная Безопасность”.:\n",
+             cancellationToken: cancellationToken
+        );
+    }
+
+    static async void choose(Update update, ITelegramBotClient botClient, CancellationToken cancellationToken, long chatId)
+    {
+        User user = GetUserByChatId(chatId);
+        SortedDictionary<int, int> labConfig = GetLabConfig();
+        List<Lab> labs = GetLabs();
+
+        if (user == null) return;
+
+        if (user.Status == UserStatus.FINAL)
+        {
+            string result = "";
+
+            foreach (var labVar in user.Config)
+            {
+                int index = labs.FindIndex(lab => lab.Id == labVar.Id);
+
+                if (index == -1) continue;
+
+                result += labs[index].Name + " - вариант " + labVar.Variant + "\r\n";
+            }
+
             await botClient.SendTextMessageAsync(
                 chatId: chatId,
-                text: text2 + "\n",
+                text: result,
                 cancellationToken: cancellationToken
-             );
+            );
+
+            return;
         }
-    }
-    static async void register(Update update, ITelegramBotClient botClient, CancellationToken cancellationToken, long chatId)
-    {
-        try
+
+        if (user.Status != UserStatus.AWAITING_CONFIG) 
         {
-            string sql = "SELECT status FROM \"users\" WHERE chat_id = (" + update.Message.Chat.Id + ")";
-            NpgsqlDataReader reader;
-            NpgsqlCommand command, command1;
+            await botClient.SendTextMessageAsync(
+                chatId: chatId,
+                text: "Вы еще не зарегистрировались в боте или не ввели ФИО/группу",
+                cancellationToken: cancellationToken
+            );
 
-            Console.WriteLine(sql);
+            return;
+        }
 
-            command = new NpgsqlCommand(sql, con);
-            reader = command.ExecuteReader();
+        if (user.Config.Count > 0)
+        {
+            await botClient.SendTextMessageAsync(
+                chatId: chatId,
+                text: "Вы уже начали выбор лабораторных работ",
+                cancellationToken: cancellationToken
+            );
 
-            if(reader.Read())
+            return;
+        }
+        // Only first group
+        user.LabGroupId = 1;
+        user.LabsCount = 0;
+
+        var list = new List<InlineKeyboardButton[]>();
+
+        foreach (var current in labs)
+        {
+            if (user.LabGroupId == current.GroupId)
             {
-                string status = reader["status"].ToString();
-                reader.Close();
+                var button = InlineKeyboardButton.WithCallbackData(current.Name, current.GroupId.ToString() + ";" + current.Id);
+                var row = new InlineKeyboardButton[1] { button };
 
-                if ((status.Split(" "))[0]=="register")
-                {
-                    if ((status.Split(" "))[1] == "1")
-                    {
-                        reader.Close();
-                        sql = String.Format("UPDATE \"users\" SET  status = 'register 2' WHERE chat_id={1};", update.Message.Text, update.Message.Chat.Id);
-                        Console.WriteLine(sql);
-                        command1 = new NpgsqlCommand(sql, con);
-                        command1.ExecuteNonQuery();
-                        Message sentMessage = await botClient.SendTextMessageAsync(
-                            chatId: chatId,
-                            text: "Введите ваше ФИО:\n",
-                            cancellationToken: cancellationToken
-                        );
-                        Console.WriteLine("Step 1 of registration : ");
-                    }
-                    else if((status.Split(" "))[1] == "2")
-                    {
-                        reader.Close();
-                        sql = String.Format("UPDATE \"users\" SET u_name = \'{0}\', status = 'register 3' WHERE chat_id={1};", update.Message.Text, update.Message.Chat.Id);
-                        Console.WriteLine(sql);
-                        command1 = new NpgsqlCommand(sql, con);
-                        command1.ExecuteNonQuery();
-                        Message sentMessage = await botClient.SendTextMessageAsync(
-                            chatId: chatId,
-                            text: "Введите номер группы:\n",
-                            cancellationToken: cancellationToken
-                        );
-                        Console.WriteLine("Step 2 of registration : ");
-                    }
-                    else if ((status.Split(" "))[1] == "3")
-                    {
-                        reader.Close();
-                        sql = String.Format("UPDATE \"users\" SET group_n = \'{0}\', status = 'choice 1' WHERE chat_id={1};", update.Message.Text, update.Message.Chat.Id);
-                        Console.WriteLine(sql);
-                        command1 = new NpgsqlCommand(sql, con);
-                        command1.ExecuteNonQuery();
-                        Message sentMessage = await botClient.SendTextMessageAsync(
-                            chatId: chatId,
-                            text: "Вы успешно зарегистрировались, пора выбрать работы:\n",
-                            cancellationToken: cancellationToken
-                        );
-                        Console.WriteLine("Registration completed : ");
-                        choicelab(update, botClient, cancellationToken, chatId);
-                    }
-                    else
-                    {
-                        Message sentMessage = await botClient.SendTextMessageAsync(
-                            chatId: chatId,
-                            text: "Я не умею работать с такими запросами:\n",
-                            cancellationToken: cancellationToken
-                         );
-                    }
-                    
-                }
-                else if ((status.Split(" "))[0] == "choice")
-                {
-                    reader.Close();
-                    choicelab(update, botClient, cancellationToken, chatId);
-                }
-                else if ((status.Split(" "))[0] == "Final")
-                {
-                    reader.Close();
-                    finalall(update, botClient, cancellationToken, chatId);
-                }
+                list.Add(row);
             }
-            reader.Close();
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine("Registration error: " + ex);
-        }
+
+        await botClient.SendTextMessageAsync(
+            chatId: chatId,
+            text: "Выберите лабораторные работы? (Всего " + labConfig.GetValueOrDefault(user.LabGroupId) + ")",
+            replyMarkup: new InlineKeyboardMarkup(list),
+            cancellationToken: cancellationToken
+        );
+
+        updateUser(chatId, user);
     }
+
     static async void start(Update update, ITelegramBotClient botClient, CancellationToken cancellationToken, long chatId)
     {
+
+
         try
         {
+            mutex.WaitOne();
+
             string sql = "SELECT chat_id FROM \"users\" WHERE chat_id = (" + update.Message.Chat.Id + ")";
-            NpgsqlDataReader reader;
             NpgsqlCommand command, command1;
+            NpgsqlDataReader reader;
 
             Console.WriteLine(sql);
+
 
             command = new NpgsqlCommand(sql, con);
             reader = command.ExecuteReader();
@@ -732,23 +854,30 @@ internal class Program
                 try
                 {
                     reader.Close();
-                    sql = String.Format("INSERT INTO \"users\" (chat_id,u_name,group_n,status,telegram_name) VALUES ({0},'none','none','register 1','{1}')", update.Message.Chat.Id, update.Message.Chat.Username);
+                    sql = String.Format("INSERT INTO \"users\" (chat_id,u_name,group_n,status,telegram_name,config,lab_group, labs_count) VALUES ({0},'none','none','{1}','{2}', '', 0, 0)", update.Message.Chat.Id, toString(UserStatus.AWAITING_NAME), update.Message.Chat.Username);
                     Console.WriteLine(sql);
                     command1 = new NpgsqlCommand(sql, con);
                     command1.ExecuteNonQuery();
 
                     Console.WriteLine("New user");
-                    Message sentMessage = await botClient.SendTextMessageAsync(
+                    await botClient.SendTextMessageAsync(
                         chatId: chatId,
                         text: "Данный бот используется для получения вариантов на лабораторные \r\nработы по курсу “Информационная Безопасность”.:\n",
                         cancellationToken: cancellationToken
                     );
+
+                    await botClient.SendTextMessageAsync(
+                       chatId: chatId,
+                       text: "Введите ФИО:\n",
+                       cancellationToken: cancellationToken
+                   );
+
+                    UploadFile("Users.csv");
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine("Registration error: " + ex);
                 }
-
             }
             else
             {
@@ -759,14 +888,13 @@ internal class Program
                     cancellationToken: cancellationToken
                 );
             }
-            reader.Close();
-            sql = String.Format("SELECT u_name,group_n,labconfig1,labconfig2,telegram_name,chat_id  FROM \"users\" ");
-            SqlToFile(sql, "Users.csv");
-            register(update, botClient, cancellationToken, chatId);             
 
+            mutex.ReleaseMutex();
+            reader.Close();
         }
         catch (Exception ex)
         {
+            mutex.ReleaseMutex();
             Console.WriteLine(ex);
         }
     }
@@ -781,7 +909,7 @@ internal class Program
             con.OpenAsync();
             Console.WriteLine("Connected to database");
 
-            return true;        
+            return true;
         }
         catch (Exception ex)
         {
@@ -789,38 +917,52 @@ internal class Program
         }
     }
 
-    static async void SqlToFile(string sql, string FileName)
+    static void UploadFile(string FileName)
     {
-        NpgsqlCommand cmd = new NpgsqlCommand(sql, con);
-        NpgsqlDataReader queryReader = cmd.ExecuteReader();
+        SortedDictionary<int,int> labConfig = GetLabConfig();
+        List<Lab> labs = GetLabs();
+        List<User> users = GetAllUsers();
+
         StreamWriter file = new StreamWriter(FileName, false, Encoding.Unicode);
 
-        string headertext = "ФИО \t Ник телеграм \t Группа \t Лаб1 \t Лаб2 \t";
+        string headertext = "ФИО \t Ник телеграм \t Группа \t ";
+
+        foreach (var config in labConfig) 
+        {
+            for (int i = 0; i != config.Value; i++)
+            {
+                headertext += config.Key.ToString() + "," + (1 + i).ToString() + " \t";    
+            }
+        }
 
         file.WriteLine(headertext);
 
-        while (queryReader.Read()) 
+        foreach (User user in users)
         {
-            string text = queryReader["u_name"].ToString() 
-                + "\t" + " " + queryReader["telegram_name"].ToString()
-                + "\t" + queryReader["group_n"].ToString()
-                + "\t" + ((queryReader["labconfig1"].ToString()).Replace("\n", " ")).Replace("Вами были выбраны следующие работы:", "") 
-                + "\t" + ((queryReader["labconfig2"].ToString()).Replace("\n", " ")).Replace("Вами были выбраны следующие работы:", "");
+            string line = user.Name + " \t " + user.TgName + " \t " + user.Group + " \t ";
 
-            text.Replace("\r\n", "");
-            text.Replace("\r", "");
-            text.Replace("\n", "");
-            file.WriteLine(text);
+            foreach (var conf in user.Config)
+            {
+                int index = labs.FindIndex(lab => lab.Id == conf.Id);
+
+                if (index != -1)
+                {
+                    Lab lab = labs[index];
+
+                    line += lab.Name + " - вариант " + conf.Variant + " \t ";
+                }
+            }
+
+            file.WriteLine(line);
         }
 
-        queryReader.Close();
         file.Close();
 
         var err = disk.UploadResource(FileName, FileName, true);
         if (err.Message == null)
             Console.WriteLine("Uploaded successfully {0}", Path.GetFileName(FileName));
         else
-           Console.WriteLine(err.Message);
+            Console.WriteLine(err.Message);
     }
 
     private static void Main(string[] args)
@@ -839,5 +981,4 @@ internal class Program
         if (!ConnectToTelegram()) return;
     }
 }
-
 
